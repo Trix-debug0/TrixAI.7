@@ -1,0 +1,102 @@
+name: Trix AI - Fixed Workspace APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract Trix AI workspace ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="TrixAI-workspace-Fixed.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            ZIP_FILE="$(find . -maxdepth 1 -type f -name 'TrixAI-workspace-*.zip' -print -quit || true)"
+          fi
+
+          if [ -z "${ZIP_FILE:-}" ] || [ ! -f "$ZIP_FILE" ]; then
+            echo "::error::TrixAI workspace ZIP not found in repository root."
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_FILE"
+          rm -rf workspace
+          mkdir -p workspace
+          unzip -q "$ZIP_FILE" -d workspace
+
+          if [ -f workspace/TrixAI/settings.gradle.kts ]; then
+            echo "PROJECT_DIR=workspace/TrixAI" >> "$GITHUB_ENV"
+          elif [ -f workspace/settings.gradle.kts ]; then
+            echo "PROJECT_DIR=workspace" >> "$GITHUB_ENV"
+          else
+            echo "::error::settings.gradle.kts not found after extraction."
+            find workspace -maxdepth 4 -type f | sort | head -200
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Gradle 8.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.2"
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Project: $PROJECT_DIR"
+          test -f "$PROJECT_DIR/settings.gradle.kts"
+          test -f "$PROJECT_DIR/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          echo "Android project files OK."
+
+      - name: Build debug APK and show real error
+        shell: bash
+        run: |
+          set +e
+          gradle --no-daemon --stacktrace --console=plain \
+            -p "$PROJECT_DIR" :app:assembleDebug 2>&1 | tee build.log
+          STATUS=${PIPESTATUS[0]}
+
+          echo ""
+          echo "================ FIRST ERROR MATCHES ================"
+          grep -n -E '(^e: |error:|ERROR:|AAPT:|FAILURE:|What went wrong:|Execution failed for|Manifest merger failed|Unresolved reference|Type mismatch|Cannot access|Expecting |Too many arguments|None of the following functions)' build.log | head -200 || true
+
+          echo ""
+          echo "================ LAST 200 LINES ================"
+          tail -200 build.log
+
+          exit "$STATUS"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trix-AI-build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trix-AI-debug
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
